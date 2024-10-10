@@ -1,21 +1,12 @@
+#include <mpi.h>
 #include <openssl/des.h>
 #include <iostream>
-#include <iomanip>
+#include <fstream>
 #include <cstring>
+#include <iomanip>
 #include <chrono>
 
-void apply_padding(unsigned char* input, size_t length, size_t padded_length) {
-    unsigned char pad_value = padded_length - length;
-    for (size_t i = length; i < padded_length; ++i) {
-        input[i] = pad_value;
-    }
-}
-
-void remove_padding(unsigned char* input, size_t& length) {
-    unsigned char pad_value = input[length - 1];
-    length -= pad_value;
-    input[length] = '\0';
-}
+// Funciones de cifrado y descifrado (las mismas de antes)
 
 void encrypt(long key, unsigned char* plain_text, size_t plain_text_len, unsigned char* result) {
     DES_key_schedule schedule;
@@ -56,40 +47,75 @@ void print_hex(const unsigned char* text, int len) {
     std::cout << std::endl;
 }
 
-int main() {
-    unsigned char plain_text[] = "Hola a todos";
-    size_t plain_text_len = strlen((char*)plain_text);
+int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);
 
-    size_t padded_length = (plain_text_len % 8 == 0) ? plain_text_len : ((plain_text_len / 8) + 1) * 8;
-    unsigned char padded_plain_text[padded_length];
-    unsigned char cipher_text[padded_length];
+    int world_size;
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+
+    int world_rank;
+    MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
+
+    // Cargar texto desde archivo
+    if (argc < 3) {
+        if (world_rank == 0) {
+            std::cerr << "Uso: " << argv[0] << " archivo.txt clave" << std::endl;
+        }
+        MPI_Finalize();
+        return -1;
+    }
+
+    std::ifstream file(argv[1]);
+    if (!file.is_open()) {
+        if (world_rank == 0) {
+            std::cerr << "No se puede abrir el archivo." << std::endl;
+        }
+        MPI_Finalize();
+        return -1;
+    }
+
+    std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    file.close();
+
+    long key = std::stol(argv[2]);
+    size_t text_len = text.length();
+    size_t padded_length = (text_len % 8 == 0) ? text_len : ((text_len / 8) + 1) * 8;
+
+    unsigned char padded_text[padded_length];
+    std::memcpy(padded_text, text.c_str(), text_len);
+
+    unsigned char encrypted_text[padded_length];
     unsigned char decrypted_text[padded_length];
 
-    std::memcpy(padded_plain_text, plain_text, plain_text_len);
-    apply_padding(padded_plain_text, plain_text_len, padded_length);
+    // División del trabajo entre procesos MPI
+    size_t chunk_size = padded_length / world_size;
+    size_t start = world_rank * chunk_size;
+    size_t end = (world_rank == world_size - 1) ? padded_length : (world_rank + 1) * chunk_size;
 
-    long key = 246801L;
-    printf("Llave: %ld\n", key);
+    // Cada proceso cifra su parte del texto
+    encrypt(key, padded_text + start, end - start, encrypted_text + start);
 
-    // Medir tiempo de cifrado
-    auto start_encrypt = std::chrono::high_resolution_clock::now();
-    encrypt(key, padded_plain_text, padded_length, cipher_text);
-    auto end_encrypt = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> encrypt_duration = end_encrypt - start_encrypt;
-    std::cout << "Tiempo de cifrado: " << encrypt_duration.count() << " segundos\n";
+    // Crear buffer de recepción en el proceso 0
+    unsigned char* gathered_text = nullptr;
+    if (world_rank == 0) {
+        gathered_text = new unsigned char[padded_length];
+    }
 
-    std::cout << "Texto cifrado: ";
-    print_hex(cipher_text, padded_length);
+    // Recoger y juntar los resultados en el proceso 0
+    MPI_Gather(encrypted_text + start, chunk_size, MPI_UNSIGNED_CHAR,
+               gathered_text, chunk_size, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
 
-    // Medir tiempo de descifrado
-    auto start_decrypt = std::chrono::high_resolution_clock::now();
-    decrypt(key, cipher_text, padded_length, decrypted_text);
-    auto end_decrypt = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> decrypt_duration = end_decrypt - start_decrypt;
-    std::cout << "Tiempo de descifrado: " << decrypt_duration.count() << " segundos\n";
+    if (world_rank == 0) {
+        std::cout << "Texto cifrado: ";
+        print_hex(gathered_text, padded_length);
 
-    remove_padding(decrypted_text, padded_length);
-    std::cout << "Texto descifrado: " << decrypted_text << std::endl;
+        // Luego descifrar y mostrar el texto original
+        decrypt(key, gathered_text, padded_length, decrypted_text);
+        std::cout << "Texto descifrado: " << decrypted_text << std::endl;
 
+        delete[] gathered_text; // Liberar memoria del buffer
+    }
+
+    MPI_Finalize();
     return 0;
 }
