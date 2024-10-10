@@ -6,6 +6,7 @@
 #include <cstring>
 #include <iomanip>
 #include <algorithm>
+#include <chrono>
 
 void pad_text(std::vector<unsigned char>& text) {
     size_t padding_size = 8 - (text.size() % 8);
@@ -42,22 +43,33 @@ void print_hex(const std::vector<unsigned char>& text) {
     std::cout << std::endl;
 }
 
+bool decrypt_and_search(long key, const std::vector<unsigned char>& ciphertext, const std::string& keyword) {
+    std::vector<unsigned char> decrypted = ciphertext;
+    process_des(key, decrypted, DES_DECRYPT);
+    unpad_text(decrypted);
+    std::string decrypted_str(decrypted.begin(), decrypted.end());
+    return decrypted_str.find(keyword) != std::string::npos;
+}
+
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
     int world_size, world_rank;
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
     MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
 
+    double start_time_total = MPI_Wtime();
+
     if (argc < 3) {
         if (world_rank == 0) {
-            std::cerr << "Uso: " << argv[0] << " archivo.txt clave" << std::endl;
+            std::cerr << "Uso: " << argv[0] << " archivo.txt clave_inicial" << std::endl;
         }
         MPI_Finalize();
         return -1;
     }
 
     std::vector<unsigned char> text;
-    long key = 0;
+    long initial_key = std::stol(argv[2]);
+    std::string keyword = "es una prueba de";
 
     if (world_rank == 0) {
         std::ifstream file(argv[1], std::ios::binary);
@@ -68,58 +80,65 @@ int main(int argc, char** argv) {
         }
         text.assign((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
         file.close();
-        key = std::stol(argv[2]);
         pad_text(text);
     }
 
-    // Broadcast the key and text size
-    MPI_Bcast(&key, 1, MPI_LONG, 0, MPI_COMM_WORLD);
     int text_size = text.size();
     MPI_Bcast(&text_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
-
-    // Resize text vector on non-root processes
     if (world_rank != 0) {
         text.resize(text_size);
     }
-
-    // Broadcast the text content
     MPI_Bcast(text.data(), text_size, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
 
-    // Divide work among processes
-    size_t chunk_size = text_size / world_size;
-    size_t start = world_rank * chunk_size;
-    size_t end = (world_rank == world_size - 1) ? text_size : start + chunk_size;
+    // Measure encryption time
+    auto start_encryption = std::chrono::high_resolution_clock::now();
+    process_des(initial_key, text, DES_ENCRYPT);
+    auto end_encryption = std::chrono::high_resolution_clock::now();
+    double encryption_time = std::chrono::duration<double>(end_encryption - start_encryption).count();
 
-    // Encrypt
-    double start_time = MPI_Wtime(); // Start time for encryption
-    process_des(key, text, DES_ENCRYPT);
-    double end_time = MPI_Wtime();   // End time for encryption
-    double encryption_time = end_time - start_time;
-
-    // Gather encrypted chunks
-    std::vector<unsigned char> encrypted_text;
-    if (world_rank == 0) {
-        encrypted_text.resize(text_size);
-    }
-
-    MPI_Gather(text.data() + start, chunk_size, MPI_UNSIGNED_CHAR,
-               encrypted_text.data(), chunk_size, MPI_UNSIGNED_CHAR, 0, MPI_COMM_WORLD);
-
+    // Print the encrypted text
     if (world_rank == 0) {
         std::cout << "Texto cifrado: ";
-        print_hex(encrypted_text);
+        print_hex(text);
         std::cout << "Tiempo de cifrado: " << encryption_time << " segundos" << std::endl;
+    }
 
-        // Decrypt
-        start_time = MPI_Wtime(); // Start time for decryption
-        process_des(key, encrypted_text, DES_DECRYPT);
-        unpad_text(encrypted_text);
-        end_time = MPI_Wtime();   // End time for decryption
-        double decryption_time = end_time - start_time;
+    // Search for the correct key
+    long key_range = 1000000; // Adjust this range as needed
+    long keys_per_process = key_range / world_size;
+    long start_key = initial_key + (world_rank * keys_per_process);
+    long end_key = (world_rank == world_size - 1) ? initial_key + key_range : start_key + keys_per_process;
 
-        std::cout << "Texto descifrado: ";
-        std::cout.write(reinterpret_cast<const char*>(encrypted_text.data()), encrypted_text.size()) << std::endl;
-        std::cout << "Tiempo de descifrado: " << decryption_time << " segundos" << std::endl;
+    long correct_key = -1;
+    for (long key = start_key; key < end_key; ++key) {
+        if (decrypt_and_search(key, text, keyword)) {
+            correct_key = key;
+            break;
+        }
+    }
+
+    long global_correct_key;
+    MPI_Allreduce(&correct_key, &global_correct_key, 1, MPI_LONG, MPI_MAX, MPI_COMM_WORLD);
+
+    double end_time_total = MPI_Wtime();
+    double total_time = end_time_total - start_time_total;
+
+    if (world_rank == 0) {
+        if (global_correct_key != -1) {
+            std::cout << "Clave correcta encontrada: " << global_correct_key << std::endl;
+            std::vector<unsigned char> decrypted = text;
+            auto start_decryption = std::chrono::high_resolution_clock::now();
+            process_des(global_correct_key, decrypted, DES_DECRYPT);
+            auto end_decryption = std::chrono::high_resolution_clock::now();
+            double decryption_time = std::chrono::duration<double>(end_decryption - start_decryption).count();
+            unpad_text(decrypted);
+            std::cout << "Texto descifrado: ";
+            std::cout.write(reinterpret_cast<const char*>(decrypted.data()), decrypted.size()) << std::endl;
+            std::cout << "Tiempo de descifrado: " << decryption_time << " segundos" << std::endl;
+        } else {
+            std::cout << "No se encontró la clave correcta en el rango especificado." << std::endl;
+        }
+        std::cout << "Tiempo total de ejecución: " << total_time << " segundos" << std::endl;
     }
 
     MPI_Finalize();
