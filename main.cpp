@@ -43,12 +43,16 @@ void print_hex(const std::vector<unsigned char>& text) {
     std::cout << std::endl;
 }
 
-bool decrypt_and_search(long key, const std::vector<unsigned char>& ciphertext, const std::string& keyword) {
+bool decrypt_and_search(unsigned long long key, const std::vector<unsigned char>& ciphertext, const std::string& keyword) {
     std::vector<unsigned char> decrypted = ciphertext;
     process_des(key, decrypted, DES_DECRYPT);
     unpad_text(decrypted);
     std::string decrypted_str(decrypted.begin(), decrypted.end());
-    return decrypted_str.find(keyword) != std::string::npos;
+    if (decrypted_str.find(keyword) != std::string::npos) {
+        std::cout << "Clave correcta encontrada: " << std::hex << key << std::dec << std::endl;
+        return true;
+    }
+    return false;
 }
 
 int main(int argc, char** argv) {
@@ -68,7 +72,7 @@ int main(int argc, char** argv) {
     }
 
     std::vector<unsigned char> text;
-    long initial_key = std::stol(argv[2]);
+    unsigned long long initial_key = std::stoull(argv[2]);
     std::string keyword = "es una prueba de";
 
     if (world_rank == 0) {
@@ -104,28 +108,35 @@ int main(int argc, char** argv) {
     }
 
     // Search for the correct key
-    long key_range = 1000000; // Adjust this range as needed
-    long keys_per_process = key_range / world_size;
-    long start_key = initial_key + (world_rank * keys_per_process);
-    long end_key = (world_rank == world_size - 1) ? initial_key + key_range : start_key + keys_per_process;
+    unsigned long long key_range = 100000000ULL; // Adjust this range as needed
+    unsigned long long keys_per_process = key_range / world_size;
+    unsigned long long start_key = (world_rank * keys_per_process);
+    unsigned long long end_key = ((world_rank + 1) * keys_per_process);
 
-    long correct_key = -1;
-    for (long key = start_key; key < end_key; ++key) {
+    // Asegurarse de que el último proceso cubra hasta la clave inicial más el rango
+    if (world_rank == world_size - 1) {
+        end_key = std::max(end_key, initial_key + key_range);
+    }
+
+    std::cout << "Proceso " << world_rank << " buscando desde " << std::hex << start_key << " hasta " << end_key << std::dec << std::endl;
+
+    unsigned long long correct_key = 0;
+    for (unsigned long long key = start_key; key < end_key; ++key) {
         if (decrypt_and_search(key, text, keyword)) {
             correct_key = key;
             break;
         }
     }
 
-    long global_correct_key;
-    MPI_Allreduce(&correct_key, &global_correct_key, 1, MPI_LONG, MPI_MAX, MPI_COMM_WORLD);
+    unsigned long long global_correct_key;
+    MPI_Allreduce(&correct_key, &global_correct_key, 1, MPI_UNSIGNED_LONG_LONG, MPI_MAX, MPI_COMM_WORLD);
 
     double end_time_total = MPI_Wtime();
     double total_time = end_time_total - start_time_total;
 
     if (world_rank == 0) {
-        if (global_correct_key != -1) {
-            std::cout << "Clave correcta encontrada: " << global_correct_key << std::endl;
+        if (global_correct_key != 0) {
+            std::cout << "Clave correcta encontrada: " << std::hex << global_correct_key << std::dec << std::endl;
             std::vector<unsigned char> decrypted = text;
             auto start_decryption = std::chrono::high_resolution_clock::now();
             process_des(global_correct_key, decrypted, DES_DECRYPT);
