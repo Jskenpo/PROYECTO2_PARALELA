@@ -60,5 +60,5 @@ mpiexec -np 4 ./OpenMP texto.txt 123456
 ## Requisitos
 
 - OpenSSL para las bibliotecas de cifrado y descifrado (`-lssl -lcrypto`).
-- MPI (Message Passing Interface) para los enfoques paralelos.
+- OpenMPI (Message Passing Interface) para los enfoques paralelos.
 - OpenMP para los enfoques paralelos
