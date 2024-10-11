@@ -1,95 +1,137 @@
 #include <openssl/des.h>
 #include <iostream>
-#include <iomanip>
+#include <fstream>
+#include <vector>
 #include <cstring>
+#include <iomanip>
 #include <chrono>
+#include <cmath>
 
-void apply_padding(unsigned char* input, size_t length, size_t padded_length) {
-    unsigned char pad_value = padded_length - length;
-    for (size_t i = length; i < padded_length; ++i) {
-        input[i] = pad_value;
+void pad_text(std::vector<unsigned char>& text) {
+    size_t padding_size = 8 - (text.size() % 8);
+    text.insert(text.end(), padding_size, static_cast<unsigned char>(padding_size));
+}
+
+void unpad_text(std::vector<unsigned char>& text) {
+    if (!text.empty()) {
+        unsigned char last_byte = text.back();
+        if (last_byte <= 8 && last_byte > 0) {
+            text.resize(text.size() - last_byte);
+        }
     }
 }
 
-void remove_padding(unsigned char* input, size_t& length) {
-    unsigned char pad_value = input[length - 1];
-    length -= pad_value;
-    input[length] = '\0';
-}
-
-void encrypt(long key, unsigned char* plain_text, size_t plain_text_len, unsigned char* result) {
+void process_des(unsigned long long key, std::vector<unsigned char>& text, int mode) {
     DES_key_schedule schedule;
     DES_cblock key_block;
-
     for (int i = 0; i < 8; ++i) {
         key_block[i] = (key >> (i * 8)) & 0xFF;
     }
-
     DES_set_odd_parity(&key_block);
     DES_set_key_checked(&key_block, &schedule);
 
-    for (size_t i = 0; i < plain_text_len; i += 8) {
-        DES_ecb_encrypt((DES_cblock*)&plain_text[i], (DES_cblock*)&result[i], &schedule, DES_ENCRYPT);
+    for (size_t i = 0; i < text.size(); i += 8) {
+        DES_ecb_encrypt((DES_cblock*)&text[i], (DES_cblock*)&text[i], &schedule, mode);
     }
 }
 
-void decrypt(long key, unsigned char* cipher_text, size_t cipher_text_len, unsigned char* result) {
-    DES_key_schedule schedule;
-    DES_cblock key_block;
-
-    for (int i = 0; i < 8; ++i) {
-        key_block[i] = (key >> (i * 8)) & 0xFF;
-    }
-
-    DES_set_odd_parity(&key_block);
-    DES_set_key_checked(&key_block, &schedule);
-
-    for (size_t i = 0; i < cipher_text_len; i += 8) {
-        DES_ecb_encrypt((DES_cblock*)&cipher_text[i], (DES_cblock*)&result[i], &schedule, DES_DECRYPT);
-    }
-}
-
-void print_hex(const unsigned char* text, int len) {
-    for (int i = 0; i < len; ++i) {
-        std::cout << std::hex << std::setfill('0') << std::setw(2) << (int)text[i];
+void print_hex(const std::vector<unsigned char>& text) {
+    for (unsigned char c : text) {
+        std::cout << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(c);
     }
     std::cout << std::endl;
 }
 
-int main() {
-    unsigned char plain_text[] = "Hola a todos";
-    size_t plain_text_len = strlen((char*)plain_text);
+// Función para realizar cálculos intensivos
+double intensive_calculation(int iterations) {
+    double result = 0.0;
+    for (int i = 0; i < iterations; ++i) {
+        result += std::sin(i) * std::cos(i);
+    }
+    return result;
+}
 
-    size_t padded_length = (plain_text_len % 8 == 0) ? plain_text_len : ((plain_text_len / 8) + 1) * 8;
-    unsigned char padded_plain_text[padded_length];
-    unsigned char cipher_text[padded_length];
-    unsigned char decrypted_text[padded_length];
+bool decrypt_and_search(unsigned long long key, const std::vector<unsigned char>& ciphertext, const std::string& keyword) {
+    std::vector<unsigned char> decrypted = ciphertext;
+    process_des(key, decrypted, DES_DECRYPT);
+    unpad_text(decrypted);
+    std::string decrypted_str(decrypted.begin(), decrypted.end());
 
-    std::memcpy(padded_plain_text, plain_text, plain_text_len);
-    apply_padding(padded_plain_text, plain_text_len, padded_length);
+    intensive_calculation(100000);
 
-    long key = 246801L;
-    printf("Llave: %ld\n", key);
+    if (decrypted_str.find(keyword) != std::string::npos) {
+        std::cout << "Clave correcta encontrada: " << std::hex << key << std::dec << std::endl;
+        return true;
+    }
+    return false;
+}
+
+int main(int argc, char** argv) {
+    if (argc < 3) {
+        std::cerr << "Uso: " << argv[0] << " archivo.txt clave_inicial" << std::endl;
+        return -1;
+    }
+
+    std::vector<unsigned char> text;
+    unsigned long long initial_key = std::stoull(argv[2]);
+    std::string keyword = "es una prueba de";
+
+    // Leer el archivo
+    std::ifstream file(argv[1], std::ios::binary);
+    if (!file) {
+        std::cerr << "No se puede abrir el archivo." << std::endl;
+        return -1;
+    }
+    text.assign((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    file.close();
+    pad_text(text);
 
     // Medir tiempo de cifrado
-    auto start_encrypt = std::chrono::high_resolution_clock::now();
-    encrypt(key, padded_plain_text, padded_length, cipher_text);
-    auto end_encrypt = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> encrypt_duration = end_encrypt - start_encrypt;
-    std::cout << "Tiempo de cifrado: " << encrypt_duration.count() << " segundos\n";
+    auto start_encryption = std::chrono::high_resolution_clock::now();
+    process_des(initial_key, text, DES_ENCRYPT);
+    auto end_encryption = std::chrono::high_resolution_clock::now();
+    double encryption_time = std::chrono::duration<double>(end_encryption - start_encryption).count();
 
     std::cout << "Texto cifrado: ";
-    print_hex(cipher_text, padded_length);
+    print_hex(text);
+    std::cout << "Tiempo de cifrado: " << encryption_time << " segundos" << std::endl;
 
-    // Medir tiempo de descifrado
-    auto start_decrypt = std::chrono::high_resolution_clock::now();
-    decrypt(key, cipher_text, padded_length, decrypted_text);
-    auto end_decrypt = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> decrypt_duration = end_decrypt - start_decrypt;
-    std::cout << "Tiempo de descifrado: " << decrypt_duration.count() << " segundos\n";
+    // Búsqueda de la clave correcta
+    unsigned long long key_range = 10000000000ULL;
+    auto start_time_total = std::chrono::high_resolution_clock::now();
 
-    remove_padding(decrypted_text, padded_length);
-    std::cout << "Texto descifrado: " << decrypted_text << std::endl;
+    unsigned long long correct_key = 0;
+    for (unsigned long long key = 0; key < key_range; ++key) {
+        if (decrypt_and_search(key, text, keyword)) {
+            correct_key = key;
+            break;
+        }
+
+        // Imprimir progreso cada 100,000 claves probadas
+        if (key % 100000 == 0) {
+            std::cout << "Probando clave: " << key << std::endl;
+        }
+    }
+
+    auto end_time_total = std::chrono::high_resolution_clock::now();
+    double total_time = std::chrono::duration<double>(end_time_total - start_time_total).count();
+
+    if (correct_key != 0) {
+        std::cout << "Clave correcta encontrada: " << std::hex << correct_key << std::dec << std::endl;
+        std::vector<unsigned char> decrypted = text;
+        auto start_decryption = std::chrono::high_resolution_clock::now();
+        process_des(correct_key, decrypted, DES_DECRYPT);
+        auto end_decryption = std::chrono::high_resolution_clock::now();
+        double decryption_time = std::chrono::duration<double>(end_decryption - start_decryption).count();
+        unpad_text(decrypted);
+        std::cout << "Texto descifrado: ";
+        std::cout.write(reinterpret_cast<const char*>(decrypted.data()), decrypted.size()) << std::endl;
+        std::cout << "Tiempo de descifrado: " << decryption_time << " segundos" << std::endl;
+    } else {
+        std::cout << "No se encontró la clave correcta en el rango especificado." << std::endl;
+    }
+
+    std::cout << "Tiempo total de ejecución: " << total_time << " segundos" << std::endl;
 
     return 0;
 }
